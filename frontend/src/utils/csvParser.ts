@@ -1,4 +1,5 @@
 import Papa from 'papaparse'
+import { normalizeCountryCode } from './countries'
 
 export interface CsvLead {
   firstName: string
@@ -49,6 +50,7 @@ export const parseCsv = (content: string): CsvLead[] => {
     if (Object.values(row).every((value) => !value)) return
 
     const lead: Partial<CsvLead> = { rowIndex: index + 2 }
+    let rawCountryCode = ''
 
     Object.entries(row).forEach(([header, value]) => {
       const normalizedHeader = header.toLowerCase().replace(/[^a-z]/g, '')
@@ -68,7 +70,8 @@ export const parseCsv = (content: string): CsvLead[] => {
           lead.jobTitle = trimmedValue || undefined
           break
         case 'countrycode':
-          lead.countryCode = trimmedValue || undefined
+          rawCountryCode = trimmedValue
+          lead.countryCode = normalizeCountryCode(trimmedValue) ?? undefined
           break
         case 'companyname':
           lead.companyName = trimmedValue || undefined
@@ -87,6 +90,9 @@ export const parseCsv = (content: string): CsvLead[] => {
       errors.push('Email is required')
     } else if (!isValidEmail(lead.email)) {
       errors.push('Invalid email format')
+    }
+    if (rawCountryCode && !lead.countryCode) {
+      errors.push(`Invalid country code: "${rawCountryCode}"`)
     }
 
     data.push({
