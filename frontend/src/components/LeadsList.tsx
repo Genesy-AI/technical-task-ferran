@@ -5,6 +5,15 @@ import { api } from '../api'
 import { MessageTemplateModal } from './MessageTemplateModal'
 import { CsvImportModal } from './CsvImportModal'
 
+const pluralEmails = (count: number) => `${count} ${count === 1 ? 'email' : 'emails'}`
+
+const Spinner: FC<{ className?: string }> = ({ className }) => (
+  <svg className={`animate-spin ${className ?? ''}`} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+  </svg>
+)
+
 export const LeadsList: FC = () => {
   const [selectedLeads, setSelectedLeads] = useState<number[]>([])
   const [isMessageModalOpen, setIsMessageModalOpen] = useState(false)
@@ -35,19 +44,37 @@ export const LeadsList: FC = () => {
     }
   })
 
+  // Verification calls a slow third-party provider (tens of seconds), so the run gets a persistent
+  // loading toast that is replaced in place by the result. Returning the id from onMutate passes it
+  // through react-query's mutation context to onSuccess/onError.
   const verifyEmailsMutation = useMutation({
     mutationFn: async (ids: number[]) => api.leads.verifyEmails({ leadIds: ids }),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['leads', 'getMany'] })
+    onMutate: (ids) => {
       setIsEnrichDropdownOpen(false)
-      toast.success(
-        data.verifiedCount === 1
-          ? `Verified ${data.verifiedCount} email`
-          : `Verified ${data.verifiedCount} emails`
-      )
+      return toast.loading(`Verifying ${pluralEmails(ids.length)}...`)
     },
-    onError: () => {
-      toast.error('Failed to verify emails. Please try again.')
+    onSuccess: (data, _ids, toastId) => {
+      queryClient.invalidateQueries({ queryKey: ['leads', 'getMany'] })
+
+      const checked = data.results.length
+      const valid = data.results.filter((result) => result.emailVerified).length
+      const failed = data.errors.length
+
+      if (checked === 0) {
+        toast.error(`Could not verify ${pluralEmails(failed)}. Please try again.`, { id: toastId })
+        return
+      }
+
+      const summary = `Checked ${pluralEmails(checked)} — ${valid} valid, ${checked - valid} invalid`
+      // Partial failures still come back as HTTP 200, so they'd otherwise pass as a clean success.
+      if (failed > 0) {
+        toast.error(`${summary}. ${pluralEmails(failed)} could not be checked.`, { id: toastId })
+      } else {
+        toast.success(summary, { id: toastId })
+      }
+    },
+    onError: (_error, _ids, toastId) => {
+      toast.error('Failed to verify emails. Please try again.', { id: toastId })
     }
   })
 
@@ -118,16 +145,25 @@ export const LeadsList: FC = () => {
             <div className="relative">
               <button
                 onClick={() => selectedLeads.length > 0 && setIsEnrichDropdownOpen(!isEnrichDropdownOpen)}
-                disabled={selectedLeads.length === 0}
+                disabled={selectedLeads.length === 0 || verifyEmailsMutation.isPending}
                 className="inline-flex items-center px-3 py-2 border border-gray-300 text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                <svg className="-ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                Enrich
-                <svg className="ml-2 -mr-1 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
+                {verifyEmailsMutation.isPending ? (
+                  <>
+                    <Spinner className="-ml-1 mr-2 h-4 w-4 text-gray-500" />
+                    Verifying...
+                  </>
+                ) : (
+                  <>
+                    <svg className="-ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    Enrich
+                    <svg className="ml-2 -mr-1 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </>
+                )}
               </button>
 
               {isEnrichDropdownOpen && selectedLeads.length > 0 && (
@@ -184,10 +220,7 @@ export const LeadsList: FC = () => {
             >
               {deleteLeadsMutation.isPending ? (
                 <>
-                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
+                  <Spinner className="-ml-1 mr-2 h-4 w-4 text-white" />
                   Deleting...
                 </>
               ) : (

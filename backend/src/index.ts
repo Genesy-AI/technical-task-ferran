@@ -286,6 +286,9 @@ app.post('/leads/verify-emails', async (req: Request, res: Response) => {
           taskQueue: 'myQueue',
           workflowId: `verify-email-${lead.id}-${Date.now()}`,
           args: [lead.email],
+          // Hard ceiling: this call blocks the HTTP response, so it must never wait forever
+          // regardless of how the activity's own timeouts/retries are configured.
+          workflowExecutionTimeout: '1 minute',
         })
 
         await prisma.lead.update({
