@@ -5,14 +5,18 @@ import toast from 'react-hot-toast'
 import { api } from '../api'
 import { CsvLead, parseCsv } from '../utils/csvParser'
 import { COUNTRY_NAMES_BY_ALPHA2 } from '../utils/countries'
+import { FieldValue, IMPORTABLE_FIELDS, LeadField, REQUIRED_FIELDS, listFieldKeys } from '../utils/leadFields'
 
 interface CsvImportModalProps {
   isOpen: boolean
   onClose: () => void
 }
 
-const countryLabel = (lead: CsvLead) =>
-  lead.countryCode ? COUNTRY_NAMES_BY_ALPHA2.get(lead.countryCode) : undefined
+const OPTIONAL_FIELDS = IMPORTABLE_FIELDS.filter((field) => !field.required)
+
+/** Country cells show the code, with the English name on hover. */
+const cellTitle = (field: LeadField, value: FieldValue | undefined) =>
+  field.type === 'country' && typeof value === 'string' ? COUNTRY_NAMES_BY_ALPHA2.get(value) : undefined
 
 export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => {
   const [csvData, setCsvData] = useState<CsvLead[]>([])
@@ -97,14 +101,8 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
     mutationFn: async (leads: CsvLead[]) => {
       const validLeads = leads.filter((lead) => lead.isValid)
 
-      const leadsToImport = validLeads.map((lead) => ({
-        firstName: lead.firstName,
-        lastName: lead.lastName,
-        email: lead.email,
-        jobTitle: lead.jobTitle || undefined,
-        countryCode: lead.countryCode || undefined,
-        companyName: lead.companyName || undefined,
-      }))
+      // Everything but the client-side bookkeeping goes up, so new fields need no change here.
+      const leadsToImport = validLeads.map(({ isValid, errors, rowIndex, ...fields }) => fields)
 
       return api.leads.bulkImport({ leads: leadsToImport })
     },
@@ -241,8 +239,8 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
                     </button>
                   </p>
                   <p className="text-sm text-gray-500">
-                    CSV must include: firstName, lastName, email (required). Optional: jobTitle, countryCode,
-                    companyName
+                    CSV must include: {listFieldKeys(REQUIRED_FIELDS)} (required). Optional:{' '}
+                    {listFieldKeys(OPTIONAL_FIELDS)}
                   </p>
                 </div>
               )}
@@ -279,18 +277,15 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
                       <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
                         Status
                       </th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
-                        Name
-                      </th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
-                        Email
-                      </th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
-                        Company
-                      </th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
-                        Country
-                      </th>
+                      {/* One column per importable field, so a new field shows up here for free. */}
+                      {IMPORTABLE_FIELDS.map((field) => (
+                        <th
+                          key={field.key}
+                          className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap"
+                        >
+                          {field.label}
+                        </th>
+                      ))}
                       <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
                         Errors
                       </th>
@@ -311,14 +306,15 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
                             </span>
                           )}
                         </td>
-                        <td className="px-3 py-2 text-sm text-gray-900">
-                          {lead.firstName} {lead.lastName || ''}
-                        </td>
-                        <td className="px-3 py-2 text-sm text-gray-900">{lead.email || '-'}</td>
-                        <td className="px-3 py-2 text-sm text-gray-900">{lead.companyName || '-'}</td>
-                        <td className="px-3 py-2 text-sm text-gray-900" title={countryLabel(lead)}>
-                          {lead.countryCode || '-'}
-                        </td>
+                        {IMPORTABLE_FIELDS.map((field) => (
+                          <td
+                            key={field.key}
+                            className="px-3 py-2 text-sm text-gray-900 max-w-48 truncate"
+                            title={cellTitle(field, lead[field.key])}
+                          >
+                            {lead[field.key] ?? '-'}
+                          </td>
+                        ))}
                         <td className="px-3 py-2 text-sm text-red-600">{lead.errors.join(', ') || '-'}</td>
                       </tr>
                     ))}

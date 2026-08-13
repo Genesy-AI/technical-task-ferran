@@ -11,6 +11,7 @@ import { Path } from 'ts-toolbelt/out/Object/Path'
 import { Split } from 'ts-toolbelt/out/String/Split'
 import { api, ApiOutput } from '..'
 import { ApiModule } from '../utils'
+import { LEAD_FIELDS } from '../../utils/leadFields'
 
 type ActuallyUseMutationOptions = any
 type MutationsApi<T extends ApiModule> = {
@@ -61,16 +62,17 @@ const apiMutationsOptions = (queryClient: QueryClient) =>
             | ApiOutput<typeof api.leads.getMany>
             | undefined
 
-          const newLead: ApiOutput<typeof api.leads.getMany>[number] = {
+          const newLead = {
             id: -1,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
-            jobTitle: null,
-            countryCode: null,
-            companyName: null,
             message: null,
+            emailVerified: null,
+            // Every registry column starts empty; the input overwrites the ones it carries. Built
+            // from the registry so a new field doesn't need remembering here.
+            ...Object.fromEntries(LEAD_FIELDS.map((field) => [field.key, null])),
             ...input,
-          }
+          } as ApiOutput<typeof api.leads.getMany>[number]
           const newLeads: ApiOutput<typeof api.leads.getMany> = [...(previousValue ?? []), newLead]
 
           queryClient.setQueryData(['leads', 'getMany'], newLeads)

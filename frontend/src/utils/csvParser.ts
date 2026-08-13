@@ -1,13 +1,22 @@
 import Papa from 'papaparse'
-import { normalizeCountryCode } from './countries'
+import {
+  CSV_HEADER_INDEX,
+  FieldKey,
+  FieldValue,
+  REQUIRED_FIELDS,
+  getLeadField,
+  normalizeCsvHeader,
+  parseFieldValue,
+} from './leadFields'
 
-export interface CsvLead {
+/**
+ * A parsed row. Field values are keyed by registry key and simply absent when the cell was blank,
+ * so a new importable field shows up here with no change to this file.
+ */
+export type CsvLead = Partial<Record<FieldKey, FieldValue>> & {
   firstName: string
   lastName: string
   email: string
-  jobTitle?: string
-  countryCode?: string
-  companyName?: string
   isValid: boolean
   errors: string[]
   rowIndex: number
@@ -49,60 +58,39 @@ export const parseCsv = (content: string): CsvLead[] => {
   parseResult.data.forEach((row, index) => {
     if (Object.values(row).every((value) => !value)) return
 
-    const lead: Partial<CsvLead> = { rowIndex: index + 2 }
-    let rawCountryCode = ''
+    const values: Partial<Record<FieldKey, FieldValue>> = {}
+    const errors: string[] = []
 
     Object.entries(row).forEach(([header, value]) => {
-      const normalizedHeader = header.toLowerCase().replace(/[^a-z]/g, '')
-      const trimmedValue = value?.trim() || ''
+      const key = CSV_HEADER_INDEX.get(normalizeCsvHeader(header))
+      const field = key ? getLeadField(key) : undefined
+      if (!key || !field) return
 
-      switch (normalizedHeader) {
-        case 'firstname':
-          lead.firstName = trimmedValue
-          break
-        case 'lastname':
-          lead.lastName = trimmedValue
-          break
-        case 'email':
-          lead.email = trimmedValue
-          break
-        case 'jobtitle':
-          lead.jobTitle = trimmedValue || undefined
-          break
-        case 'countrycode':
-          rawCountryCode = trimmedValue
-          lead.countryCode = normalizeCountryCode(trimmedValue) ?? undefined
-          break
-        case 'companyname':
-          lead.companyName = trimmedValue || undefined
-          break
-      }
+      const { value: parsed, error } = parseFieldValue(field, value)
+      if (error) errors.push(error)
+      // Left absent rather than null when blank, so `lead.jobTitle` reads as "not provided".
+      if (parsed !== null) values[key] = parsed
     })
 
-    const errors: string[] = []
-    if (!lead.firstName?.trim()) {
-      errors.push('First name is required')
+    for (const field of REQUIRED_FIELDS) {
+      if (values[field.key] === undefined) {
+        errors.push(`${field.label} is required`)
+      }
     }
-    if (!lead.lastName?.trim()) {
-      errors.push('Last name is required')
-    }
-    if (!lead.email?.trim()) {
-      errors.push('Email is required')
-    } else if (!isValidEmail(lead.email)) {
+
+    if (values.email !== undefined && !isValidEmail(String(values.email))) {
       errors.push('Invalid email format')
-    }
-    if (rawCountryCode && !lead.countryCode) {
-      errors.push(`Invalid country code: "${rawCountryCode}"`)
     }
 
     data.push({
-      ...lead,
-      firstName: lead.firstName || '',
-      lastName: lead.lastName || '',
-      email: lead.email || '',
+      ...values,
+      firstName: String(values.firstName ?? ''),
+      lastName: String(values.lastName ?? ''),
+      email: String(values.email ?? ''),
       isValid: errors.length === 0,
       errors,
-    } as CsvLead)
+      rowIndex: index + 2,
+    })
   })
 
   return data

@@ -1,10 +1,16 @@
-import { PrismaClient } from '@prisma/client'
+import { Prisma, PrismaClient } from '@prisma/client'
 import express, { Request, Response } from 'express'
 import { Connection, Client } from '@temporalio/client'
 import { verifyEmailWorkflow } from './workflows'
 import { generateMessageFromTemplate } from './utils/messageGenerator'
 import { runTemporalWorker } from './worker'
-import { normalizeCountryCode } from './utils/countries'
+import {
+  FieldValue,
+  IMPORTABLE_FIELDS,
+  REQUIRED_FIELDS,
+  listFieldKeys,
+  parseFieldValue,
+} from './utils/leadFields'
 const prisma = new PrismaClient()
 const app = express()
 app.use(express.json())
@@ -168,6 +174,28 @@ app.post('/leads/generate-messages', async (req: Request, res: Response) => {
   }
 })
 
+/**
+ * Coerce one row of an import payload into a lead, using the field registry as the whitelist.
+ * The client validates the same way before uploading; this is the authoritative pass.
+ */
+const coerceImportedLead = (raw: unknown): { data: Prisma.leadCreateInput; errors: string[] } => {
+  const row = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const data: Record<string, FieldValue> = {}
+  const errors: string[] = []
+
+  for (const field of IMPORTABLE_FIELDS) {
+    const { value, error } = parseFieldValue(field, row[field.key])
+
+    if (error) errors.push(error)
+    if (field.required && value === null) errors.push(`${field.key} is required`)
+
+    data[field.key] = value
+  }
+
+  // Built key-by-key from the registry, so its static type is the registry's rather than Prisma's.
+  return { data: data as unknown as Prisma.leadCreateInput, errors }
+}
+
 app.post('/leads/bulk', async (req: Request, res: Response) => {
   if (!req.body || typeof req.body !== 'object') {
     return res.status(400).json({ error: 'Request body is required and must be valid JSON' })
@@ -180,32 +208,23 @@ app.post('/leads/bulk', async (req: Request, res: Response) => {
   }
 
   try {
-    const validLeads = leads.filter((lead) => {
-      return (
-        lead.firstName &&
-        lead.lastName &&
-        lead.email &&
-        typeof lead.firstName === 'string' &&
-        lead.firstName.trim() &&
-        typeof lead.lastName === 'string' &&
-        lead.lastName.trim() &&
-        typeof lead.email === 'string' &&
-        lead.email.trim() &&
-        // An absent country is fine; a value that is not ISO 3166-1 is not.
-        (!lead.countryCode || normalizeCountryCode(lead.countryCode) !== null)
-      )
-    })
+    // Every importable field is coerced and validated through the registry, so a new field needs
+    // no changes here — only a LEAD_FIELDS entry and a migration.
+    const validLeads = leads
+      .map((lead) => coerceImportedLead(lead))
+      .filter((candidate) => candidate.errors.length === 0)
+      .map((candidate) => candidate.data)
 
     if (validLeads.length === 0) {
       return res
         .status(400)
-        .json({ error: 'No valid leads found. firstName, lastName, and email are required.' })
+        .json({ error: `No valid leads found. ${listFieldKeys(REQUIRED_FIELDS)} are required.` })
     }
 
     const existingLeads = await prisma.lead.findMany({
       where: {
         OR: validLeads.map((lead) => ({
-          AND: [{ firstName: lead.firstName.trim() }, { lastName: lead.lastName.trim() }],
+          AND: [{ firstName: lead.firstName }, { lastName: lead.lastName }],
         })),
       },
     })
@@ -224,16 +243,7 @@ app.post('/leads/bulk', async (req: Request, res: Response) => {
 
     for (const lead of uniqueLeads) {
       try {
-        await prisma.lead.create({
-          data: {
-            firstName: lead.firstName.trim(),
-            lastName: lead.lastName.trim(),
-            email: lead.email.trim(),
-            jobTitle: lead.jobTitle ? lead.jobTitle.trim() : null,
-            countryCode: normalizeCountryCode(lead.countryCode),
-            companyName: lead.companyName ? lead.companyName.trim() : null,
-          },
-        })
+        await prisma.lead.create({ data: lead })
         importedCount++
       } catch (error) {
         errors.push({

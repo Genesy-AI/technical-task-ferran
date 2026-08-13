@@ -1,23 +1,24 @@
-import { FC, useState, useEffect, useCallback, useRef } from 'react'
+import { FC, useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import { api } from '../api'
+import { Lead } from '../api/types/leads/getMany'
+import { FieldKey } from '../utils/leadFields'
+import { renderTemplatePreview, willBeSkipped } from '../utils/templatePreview'
+import { MessageFieldPicker } from './MessageFieldPicker'
+import { MessagePreview } from './MessagePreview'
 
 interface MessageTemplateModalProps {
   isOpen: boolean
   onClose: () => void
-  selectedLeadIds: number[]
-  selectedLeadsCount: number
+  selectedLeads: Lead[]
 }
 
-export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
-  isOpen,
-  onClose,
-  selectedLeadIds,
-  selectedLeadsCount,
-}) => {
+export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({ isOpen, onClose, selectedLeads }) => {
+  const selectedLeadsCount = selectedLeads.length
   const [template, setTemplate] = useState('')
+  const [previewIndex, setPreviewIndex] = useState(0)
   const [generationResult, setGenerationResult] = useState<{
     success: boolean
     generatedCount: number
@@ -60,11 +61,11 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (template.trim() && selectedLeadIds.length > 0) {
+    if (template.trim() && selectedLeads.length > 0) {
       setGenerationResult(null)
 
       generateMessagesMutation.mutate({
-        leadIds: selectedLeadIds,
+        leadIds: selectedLeads.map((lead) => lead.id),
         template: template.trim(),
       })
     }
@@ -75,6 +76,7 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
       onClose()
       setTemplate('')
       setGenerationResult(null)
+      setPreviewIndex(0)
     }
   }, [generateMessagesMutation.isPending, onClose])
 
@@ -106,24 +108,47 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
     }
   }, [isOpen, handleClose])
 
-  const availableFields = ['firstName', 'lastName', 'email', 'jobTitle', 'companyName', 'countryCode']
+  const insertField = (field: FieldKey) => {
+    const textarea = textareaRef.current
+    // No caret to splice into if the textarea was never focused — append instead of dropping it.
+    const start = textarea ? textarea.selectionStart : template.length
+    const end = textarea ? textarea.selectionEnd : template.length
+    const placeholder = `{${field}}`
 
-  const insertField = (field: string) => {
-    if (textareaRef.current) {
-      const textarea = textareaRef.current
-      const start = textarea.selectionStart
-      const end = textarea.selectionEnd
-      const newTemplate = template.substring(0, start) + `{${field}}` + template.substring(end)
-      setTemplate(newTemplate)
+    setTemplate(template.substring(0, start) + placeholder + template.substring(end))
 
-      setTimeout(() => {
-        textarea.focus()
-        textarea.setSelectionRange(start + field.length + 2, start + field.length + 2)
-      }, 0)
-    }
+    setTimeout(() => {
+      textarea?.focus()
+      textarea?.setSelectionRange(start + placeholder.length, start + placeholder.length)
+    }, 0)
   }
 
+  /**
+   * One render per selected lead. Cheap at the selection sizes this table produces; if selections
+   * ever run to thousands, the skip summary should move behind a debounce or onto the server.
+   */
+  const previews = useMemo(
+    () => selectedLeads.map((lead) => renderTemplatePreview(template, lead)),
+    [template, selectedLeads]
+  )
+
+  const skipped = useMemo(() => {
+    const reasons = new Set<string>()
+    let count = 0
+
+    previews.forEach((preview) => {
+      if (!willBeSkipped(preview)) return
+      count++
+      preview.missing.forEach((key) => reasons.add(key))
+      preview.unknown.forEach((name) => reasons.add(name))
+    })
+
+    return { count, reasons: Array.from(reasons) }
+  }, [previews])
+
   if (!isOpen) return null
+
+  const safePreviewIndex = Math.min(previewIndex, Math.max(selectedLeads.length - 1, 0))
 
   const modalContent = (
     <div
@@ -131,7 +156,7 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
       onClick={handleBackdropClick}
     >
       <div
-        className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto"
+        className="bg-white rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-6">
@@ -155,33 +180,36 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
               <label htmlFor="message-template" className="block text-sm font-medium text-gray-700 mb-2">
                 Message Template
               </label>
-              <div className="space-y-3">
-                <div className="flex flex-wrap gap-2">
-                  <span className="text-sm text-gray-600">Insert field:</span>
-                  {availableFields.map((field) => (
-                    <button
-                      key={field}
-                      type="button"
-                      onClick={() => insertField(field)}
-                      className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded hover:bg-blue-200 transition-colors"
-                    >
-                      {`{${field}}`}
-                    </button>
-                  ))}
+              <div className="grid gap-4 md:grid-cols-[16rem_1fr]">
+                <div className="space-y-1">
+                  <span className="block text-sm text-gray-600">Insert field</span>
+                  <MessageFieldPicker leads={selectedLeads} onInsert={insertField} />
                 </div>
-                <textarea
-                  ref={textareaRef}
-                  id="message-template"
-                  value={template}
-                  onChange={(e) => setTemplate(e.target.value)}
-                  placeholder="Enter your message template here. Use {fieldName} to insert dynamic values.&#10;&#10;Example: Hi {firstName}, I noticed you work at {companyName} as a {jobTitle}. Would you be interested in..."
-                  className="w-full h-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
-                  required
-                />
+
+                <div className="space-y-4">
+                  <textarea
+                    ref={textareaRef}
+                    id="message-template"
+                    value={template}
+                    onChange={(e) => setTemplate(e.target.value)}
+                    placeholder="Enter your message template here. Use {fieldName} to insert dynamic values.&#10;&#10;Example: Hi {firstName}, I noticed you work at {companyName} as a {jobTitle}. Would you be interested in..."
+                    className="w-full h-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+                    required
+                  />
+
+                  <MessagePreview
+                    leads={selectedLeads}
+                    index={safePreviewIndex}
+                    onIndexChange={setPreviewIndex}
+                    preview={previews[safePreviewIndex] ?? { segments: [], missing: [], unknown: [] }}
+                    skippedCount={skipped.count}
+                    skipReasons={skipped.reasons}
+                  />
+                </div>
               </div>
               <p className="mt-2 text-sm text-gray-500">
-                Use curly braces around field names (e.g., {`{firstName}`}) to insert dynamic values. If a
-                field is missing for a lead, an error will be shown and no message will be generated for that
+                Use curly braces around field names (e.g., {`{firstName}`}) to insert dynamic values. A field
+                a lead has no value for is highlighted in the preview, and no message is generated for that
                 lead.
               </p>
             </div>

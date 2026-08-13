@@ -1,9 +1,105 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { FC, useState } from 'react'
+import { FC, ReactNode, useMemo, useState } from 'react'
 import toast from 'react-hot-toast'
 import { api } from '../api'
+import { Lead } from '../api/types/leads/getMany'
+import { COUNTRY_NAMES_BY_ALPHA2 } from '../utils/countries'
+import { FieldKey, LEAD_FIELDS, LeadField } from '../utils/leadFields'
 import { MessageTemplateModal } from './MessageTemplateModal'
 import { CsvImportModal } from './CsvImportModal'
+
+const formatDate = (dateString: string) =>
+  new Date(dateString).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+
+/** `https://www.linkedin.com/in/jane/` -> `linkedin.com/in/jane` — the column is narrow. */
+const shortenUrl = (url: string) => url.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '')
+
+interface Column {
+  key: string
+  label: string
+  render: (lead: Lead) => ReactNode
+}
+
+/** Generic cell for a registry field, presented according to its declared type. */
+const fieldColumn = (field: LeadField): Column => ({
+  key: field.key,
+  label: field.label,
+  render: (lead) => {
+    const value = lead[field.key]
+
+    if (value === null || value === undefined || value === '') {
+      return <div className="text-sm text-gray-900">-</div>
+    }
+
+    if (field.type === 'url') {
+      return (
+        <a
+          href={String(value)}
+          target="_blank"
+          rel="noreferrer"
+          className="text-sm text-blue-600 hover:text-blue-800 hover:underline"
+          title={String(value)}
+        >
+          {shortenUrl(String(value))}
+        </a>
+      )
+    }
+
+    if (field.type === 'country') {
+      return (
+        <div className="text-sm text-gray-900" title={COUNTRY_NAMES_BY_ALPHA2.get(String(value))}>
+          {value}
+        </div>
+      )
+    }
+
+    return <div className="text-sm text-gray-900">{value}</div>
+  },
+})
+
+/** These three get bespoke presentation below; every other registry field is generic. */
+const CUSTOM_RENDERED_FIELDS: FieldKey[] = ['firstName', 'lastName', 'email']
+
+const COLUMNS: Column[] = [
+  {
+    key: 'name',
+    label: 'Name',
+    render: (lead) => (
+      <div className="text-sm font-medium text-gray-900">
+        {lead.firstName} {lead.lastName || ''}
+      </div>
+    ),
+  },
+  {
+    key: 'email',
+    label: 'Email',
+    render: (lead) => (
+      <div className="text-sm text-gray-900">
+        {lead.email || '-'} {lead.emailVerified === null ? '❓' : lead.emailVerified ? '✅' : '❌'}
+      </div>
+    ),
+  },
+  // Everything else in the registry, in registry order — a new field becomes a column for free.
+  ...LEAD_FIELDS.filter((field) => !CUSTOM_RENDERED_FIELDS.includes(field.key)).map(fieldColumn),
+  {
+    key: 'message',
+    label: 'Message',
+    render: (lead) => (
+      <div className="text-sm text-gray-900 max-w-xs truncate" title={lead.message || ''}>
+        {lead.message || '-'}
+      </div>
+    ),
+  },
+  {
+    key: 'createdAt',
+    label: 'Created',
+    render: (lead) => <div className="text-sm text-gray-500">{formatDate(lead.createdAt)}</div>,
+  },
+]
 
 export const LeadsList: FC = () => {
   const [selectedLeads, setSelectedLeads] = useState<number[]>([])
@@ -73,13 +169,11 @@ export const LeadsList: FC = () => {
     }
   }
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    })
-  }
+  // The compose modal previews templates against real values, so it needs the leads themselves.
+  const selectedLeadRecords = useMemo(
+    () => (leads.data ?? []).filter((lead) => selectedLeads.includes(lead.id)),
+    [leads.data, selectedLeads]
+  )
 
   if (leads.isLoading) {
     return (
@@ -306,48 +400,15 @@ export const LeadsList: FC = () => {
                     onChange={(e) => handleSelectAll(e.target.checked)}
                   />
                 </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50"
-                >
-                  Name
-                </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50"
-                >
-                  Email
-                </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50"
-                >
-                  Job Title
-                </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50"
-                >
-                  Company
-                </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50"
-                >
-                  Country
-                </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50"
-                >
-                  Message
-                </th>
-                <th
-                  scope="col"
-                  className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50"
-                >
-                  Created
-                </th>
+                {COLUMNS.map((column) => (
+                  <th
+                    key={column.key}
+                    scope="col"
+                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50 whitespace-nowrap"
+                  >
+                    {column.label}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -367,34 +428,11 @@ export const LeadsList: FC = () => {
                         onChange={(e) => handleSelectLead(lead.id, e.target.checked)}
                       />
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900">
-                        {lead.firstName} {lead.lastName || ''}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">
-                        {lead.email || '-'}{' '}
-                        {lead.emailVerified === null ? '❓' : lead.emailVerified ? '✅' : '❌'}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">{lead.jobTitle || '-'}</div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">{lead.companyName || '-'}</div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">{lead.countryCode || '-'}</div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="text-sm text-gray-900 max-w-xs truncate" title={lead.message || ''}>
-                        {lead.message || '-'}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {formatDate(lead.createdAt)}
-                    </td>
+                    {COLUMNS.map((column) => (
+                      <td key={column.key} className="px-6 py-4 whitespace-nowrap">
+                        {column.render(lead)}
+                      </td>
+                    ))}
                   </tr>
                 ))}
             </tbody>
@@ -433,8 +471,7 @@ export const LeadsList: FC = () => {
       <MessageTemplateModal
         isOpen={isMessageModalOpen}
         onClose={() => setIsMessageModalOpen(false)}
-        selectedLeadIds={selectedLeads}
-        selectedLeadsCount={selectedLeads.length}
+        selectedLeads={selectedLeadRecords}
       />
 
       <CsvImportModal isOpen={isImportModalOpen} onClose={() => setIsImportModalOpen(false)} />

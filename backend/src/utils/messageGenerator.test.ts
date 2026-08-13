@@ -205,5 +205,47 @@ describe('generateMessageFromTemplate', () => {
       const result = generateMessageFromTemplate(template, emojiLead)
       expect(result).toBe('Hi John 😊 from TechCorp 🚀!')
     })
+
+    it('should treat $-sequences in a field value as literal text', () => {
+      // `String.replace` reads `$&`, `$1` and friends out of the *replacement* as patterns, so a
+      // lead value containing them would otherwise be mangled.
+      const dollarLead: Lead = { firstName: 'John', companyName: 'A$&B $1 C$`D' }
+      const result = generateMessageFromTemplate('{firstName} at {companyName}', dollarLead)
+      expect(result).toBe('John at A$&B $1 C$`D')
+    })
+  })
+
+  describe('fields added to the registry', () => {
+    it('substitutes the phone, tenure and LinkedIn placeholders', () => {
+      const lead: Lead = {
+        firstName: 'Jane',
+        phoneNumber: '+34 600 000 000',
+        yearsInRole: 4,
+        linkedinUrl: 'https://linkedin.com/in/jane',
+      }
+      const template = '{firstName} — {yearsInRole} years, {phoneNumber}, {linkedinUrl}'
+      expect(generateMessageFromTemplate(template, lead)).toBe(
+        'Jane — 4 years, +34 600 000 000, https://linkedin.com/in/jane'
+      )
+    })
+
+    it('renders a numeric field of zero rather than treating it as missing', () => {
+      const lead: Lead = { firstName: 'Jane', yearsInRole: 0 }
+      expect(generateMessageFromTemplate('{yearsInRole} years', lead)).toBe('0 years')
+    })
+
+    it('still refuses a lead that is missing one of the new fields', () => {
+      const lead: Lead = { firstName: 'Jane' }
+      expect(() => generateMessageFromTemplate('Call {phoneNumber}', lead)).toThrow(
+        'Missing required field: phoneNumber'
+      )
+    })
+
+    it('rejects placeholders for columns that are not user-settable fields', () => {
+      const lead: Lead = { firstName: 'Jane' }
+      expect(() => generateMessageFromTemplate('{message}', lead)).toThrow(
+        'Unknown field in template: message'
+      )
+    })
   })
 })

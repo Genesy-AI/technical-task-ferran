@@ -17,6 +17,9 @@ model lead {
   jobTitle    String?
   countryCode String?
   companyName String?
+  phoneNumber String?
+  yearsInRole Int?
+  linkedinUrl String?
   message     String?
   emailVerified Boolean?
 }
