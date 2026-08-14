@@ -1,9 +1,11 @@
-import { Prisma, PrismaClient } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import express, { Request, Response } from 'express'
-import { Connection, Client } from '@temporalio/client'
-import { verifyEmailWorkflow } from './workflows'
+import { Connection, Client, WorkflowExecutionAlreadyStartedError } from '@temporalio/client'
+import { enrichPhoneWorkflow, verifyEmailWorkflow } from './workflows'
 import { generateMessageFromTemplate } from './utils/messageGenerator'
-import { runTemporalWorker } from './worker'
+import { MAIN_TASK_QUEUE, runTemporalWorker } from './worker'
+import { prisma } from './prisma'
+import { getTemporalClient } from './temporal'
 import {
   FieldValue,
   IMPORTABLE_FIELDS,
@@ -11,7 +13,6 @@ import {
   listFieldKeys,
   parseFieldValue,
 } from './utils/leadFields'
-const prisma = new PrismaClient()
 const app = express()
 app.use(express.json())
 
@@ -323,6 +324,91 @@ app.post('/leads/verify-emails', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error verifying emails:', error)
     res.status(500).json({ error: 'Failed to verify emails' })
+  }
+})
+
+/**
+ * Kicks off one enrich-phone workflow per lead and returns immediately.
+ *
+ * Deliberately unlike `/leads/verify-emails` above, which awaits `workflow.execute` in a serial
+ * loop and therefore holds the HTTP request open for the length of the slowest workflow. Here the
+ * `lead` row is the read model: the workflow writes its progress there and the table polls it, so
+ * feedback survives a page reload and a closed tab doesn't cancel the work.
+ */
+app.post('/leads/enrich-phone', async (req: Request, res: Response) => {
+  if (!req.body || typeof req.body !== 'object') {
+    return res.status(400).json({ error: 'Request body is required and must be valid JSON' })
+  }
+
+  const { leadIds } = req.body as { leadIds?: number[] }
+
+  if (!Array.isArray(leadIds) || leadIds.length === 0) {
+    return res.status(400).json({ error: 'leadIds must be a non-empty array' })
+  }
+
+  try {
+    const leads = await prisma.lead.findMany({
+      where: { id: { in: leadIds.map((id) => Number(id)) } },
+      select: { id: true, firstName: true, lastName: true },
+    })
+
+    if (leads.length === 0) {
+      return res.status(404).json({ error: 'No leads found with the provided IDs' })
+    }
+
+    // Marked before starting, not after: a fast provider can finish and write `found` while this
+    // request is still in its loop, and a late `running` write would clobber the result.
+    await prisma.lead.updateMany({
+      where: { id: { in: leads.map((lead) => lead.id) } },
+      data: { phoneStatus: 'running', phoneProvider: null },
+    })
+
+    const client = await getTemporalClient()
+
+    const started: number[] = []
+    const alreadyRunning: number[] = []
+    const errors: Array<{ leadId: number; leadName: string; error: string }> = []
+
+    for (const lead of leads) {
+      try {
+        await client.workflow.start(enrichPhoneWorkflow, {
+          taskQueue: MAIN_TASK_QUEUE,
+          // Idempotency: one live enrichment per lead. FAIL surfaces the duplicate instead of
+          // silently attaching to it, so the response can say which leads were already in flight.
+          workflowId: `enrich-phone-${lead.id}`,
+          workflowIdConflictPolicy: 'FAIL',
+          // ...but a lead may be enriched again once the previous run has closed.
+          workflowIdReusePolicy: 'ALLOW_DUPLICATE',
+          args: [lead.id],
+        })
+
+        started.push(lead.id)
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) {
+          alreadyRunning.push(lead.id)
+          continue
+        }
+
+        errors.push({
+          leadId: lead.id,
+          leadName: `${lead.firstName} ${lead.lastName}`.trim(),
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+      }
+    }
+
+    // Nothing is going to move these rows off `running`, so undo the optimistic mark.
+    if (errors.length > 0) {
+      await prisma.lead.updateMany({
+        where: { id: { in: errors.map((failure) => failure.leadId) } },
+        data: { phoneStatus: 'failed' },
+      })
+    }
+
+    res.json({ success: true, started, alreadyRunning, errors })
+  } catch (error) {
+    console.error('Error starting phone enrichment:', error)
+    res.status(500).json({ error: 'Failed to start phone enrichment' })
   }
 })
 

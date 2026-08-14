@@ -1,4 +1,5 @@
 import type { FIELD_DEFINITIONS } from '../../../utils/leadFields'
+import type { PhoneStatus } from '../../../utils/phoneProviders'
 
 export type LeadsGetManyInput = undefined
 
@@ -21,6 +22,10 @@ export type Lead = {
   updatedAt: string
   message: string | null
   emailVerified: boolean | null
+  /** Written by the enrich-phone workflow; the table polls these while a lookup is in flight. */
+  phoneStatus: PhoneStatus | null
+  phoneProvider: string | null
+  phoneCheckedAt: string | null
 } & RegistryColumns
 
 export type LeadsGetManyOutput = Lead[]

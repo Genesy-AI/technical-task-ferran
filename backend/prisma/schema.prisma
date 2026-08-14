@@ -22,4 +22,9 @@ model lead {
   linkedinUrl String?
   message     String?
   emailVerified Boolean?
+  // Phone enrichment bookkeeping. System fields, not user-settable, so they stay out of
+  // LEAD_FIELDS — same treatment as emailVerified.
+  phoneStatus    String?   // running | found | not_found | failed
+  phoneProvider  String?   // orionConnect | astraDialer | nimbusLookup
+  phoneCheckedAt DateTime?
 }

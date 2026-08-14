@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { FC, ReactNode, useMemo, useState } from 'react'
+import { FC, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { api } from '../api'
 import { Lead } from '../api/types/leads/getMany'
 import { COUNTRY_NAMES_BY_ALPHA2 } from '../utils/countries'
 import { FieldKey, LEAD_FIELDS, LeadField } from '../utils/leadFields'
+import { providerLabel } from '../utils/phoneProviders'
 import { MessageTemplateModal } from './MessageTemplateModal'
 import { CsvImportModal } from './CsvImportModal'
 
@@ -61,6 +62,53 @@ const fieldColumn = (field: LeadField): Column => ({
   },
 })
 
+/**
+ * Phone carries enrichment state on top of its value, so it renders the workflow's progress rather
+ * than just the column. Still a registry field, so it keeps its position in the table.
+ */
+const phoneColumn = (field: LeadField): Column => ({
+  key: field.key,
+  label: field.label,
+  render: (lead) => {
+    const value = lead.phoneNumber
+
+    if (lead.phoneStatus === 'running') {
+      return (
+        <div className="flex items-center text-sm text-blue-700">
+          <svg className="animate-spin mr-2 h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+            />
+          </svg>
+          {providerLabel(lead.phoneProvider) ?? 'Starting'}…
+        </div>
+      )
+    }
+
+    if (value) {
+      const source = providerLabel(lead.phoneProvider)
+      return (
+        <div className="text-sm text-gray-900" title={source ? `Found via ${source}` : undefined}>
+          {value}
+        </div>
+      )
+    }
+
+    if (lead.phoneStatus === 'not_found') {
+      return <div className="text-sm text-gray-400 italic">No data found</div>
+    }
+
+    if (lead.phoneStatus === 'failed') {
+      return <div className="text-sm text-red-600">Lookup failed</div>
+    }
+
+    return <div className="text-sm text-gray-900">-</div>
+  },
+})
+
 /** These three get bespoke presentation below; every other registry field is generic. */
 const CUSTOM_RENDERED_FIELDS: FieldKey[] = ['firstName', 'lastName', 'email']
 
@@ -84,7 +132,9 @@ const COLUMNS: Column[] = [
     ),
   },
   // Everything else in the registry, in registry order — a new field becomes a column for free.
-  ...LEAD_FIELDS.filter((field) => !CUSTOM_RENDERED_FIELDS.includes(field.key)).map(fieldColumn),
+  ...LEAD_FIELDS.filter((field) => !CUSTOM_RENDERED_FIELDS.includes(field.key)).map((field) =>
+    field.key === 'phoneNumber' ? phoneColumn(field) : fieldColumn(field)
+  ),
   {
     key: 'message',
     label: 'Message',
@@ -112,6 +162,10 @@ export const LeadsList: FC = () => {
     queryKey: ['leads', 'getMany'],
     queryFn: async () => api.leads.getMany(),
     retry: false,
+    // The enrich-phone workflows run past the HTTP response, so poll while any are in flight and
+    // stop as soon as they settle. The lead rows are the progress feed; no extra endpoint.
+    refetchInterval: (query) =>
+      query.state.data?.some((lead) => lead.phoneStatus === 'running') ? 1500 : false,
   })
 
   const deleteLeadsMutation = useMutation({
@@ -146,6 +200,76 @@ export const LeadsList: FC = () => {
       toast.error('Failed to verify emails. Please try again.')
     },
   })
+
+  const enrichPhonesMutation = useMutation({
+    mutationFn: async (ids: number[]) => api.leads.enrichPhones({ leadIds: ids }),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['leads', 'getMany'] })
+      setIsEnrichDropdownOpen(false)
+
+      if (data.started.length > 0) {
+        // Held open until the last lookup settles — the request only starts the work, so a
+        // success toast here would claim a result we do not have yet.
+        phoneToastId.current = toast.loading(
+          data.started.length === 1
+            ? 'Looking up 1 phone number...'
+            : `Looking up ${data.started.length} phone numbers...`
+        )
+      }
+      if (data.alreadyRunning.length > 0) {
+        toast(`${data.alreadyRunning.length} already being enriched`)
+      }
+      if (data.errors.length > 0) {
+        toast.error(`Could not start enrichment for ${data.errors.length} lead(s)`)
+      }
+    },
+    onError: () => {
+      toast.error('Failed to start phone enrichment. Please try again.')
+    },
+  })
+
+  /**
+   * The work finishes on the server, so completion is detected by watching rows leave `running`
+   * rather than by awaiting the request that started them.
+   */
+  const runningPhoneLookups = useRef<Set<number>>(new Set())
+  /** Loading toast held for the duration of a lookup batch, swapped for the outcome when it settles. */
+  const phoneToastId = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!leads.data) return
+
+    const running = new Set(
+      leads.data.filter((lead) => lead.phoneStatus === 'running').map((lead) => lead.id)
+    )
+    const settled = leads.data.filter(
+      (lead) => runningPhoneLookups.current.has(lead.id) && !running.has(lead.id)
+    )
+    runningPhoneLookups.current = running
+
+    if (settled.length === 0) return
+
+    const found = settled.filter((lead) => lead.phoneStatus === 'found').length
+    const failed = settled.filter((lead) => lead.phoneStatus === 'failed').length
+    const missing = settled.length - found - failed
+
+    const parts = [
+      found > 0 && `${found} found`,
+      missing > 0 && `${missing} not found`,
+      failed > 0 && `${failed} failed`,
+    ].filter(Boolean)
+    const summary = `${settled.length} lookup${settled.length === 1 ? '' : 's'} finished — ${parts.join(', ')}`
+
+    // Still work in flight: keep the spinner up rather than reporting a partial result as final.
+    if (running.size > 0) return
+
+    const id = phoneToastId.current ?? undefined
+    phoneToastId.current = null
+
+    if (failed > 0) toast.error(summary, { id })
+    else if (found > 0) toast.success(summary, { id })
+    else toast(summary, { id })
+  }, [leads.data])
 
   const handleSelectAll = (checked: boolean) => {
     if (checked && leads.data) {
@@ -299,6 +423,29 @@ export const LeadsList: FC = () => {
                           />
                         </svg>
                         Verify Email
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => enrichPhonesMutation.mutate(selectedLeads)}
+                      disabled={enrichPhonesMutation.isPending}
+                      className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50 transition-colors"
+                    >
+                      <div className="flex items-center">
+                        <svg
+                          className="mr-3 h-4 w-4"
+                          xmlns="http://www.w3.org/2000/svg"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"
+                          />
+                        </svg>
+                        Enrich Phone
                       </div>
                     </button>
                     <button
